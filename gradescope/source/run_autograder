@@ -1,14 +1,108 @@
 #!/usr/bin/env bash
 
-/usr/games/cowsay "Hello, world!"
+# Set up the environment
+source ./source/helper_functions/trycatch.sh 
+export ERR_RATE=100
+export ERR_GENERIC=101
+# Note there's no checking on whether these work. If these fails there's no user friendly message displayed to students
 
-files_submitted=$(ls /autograder/submission)
-num_files_submitted=$(ls /autograder/submission/ | wc -l)
 
-cat > /autograder/results/results.json <<EOF
-{
-  "output": "Good job, you passed! Submitted ${num_files_submitted} files: ${files_submitted}",
-  "score": 10,
-  "max_score": 10
+
+# Check the number of submissions hasn't exceeded the threshold. Only proceed if so.
+# Bash doesn't like a redirect on the jq command for some reason here and so the writing to results.json is done in a seperate if statement for ease of getting working
+try
+(
+	chmod u+x ./source/helper_functions/rate_limiter.sh
+	limit_check=$(./source/helper_functions/rate_limiter.sh)
+	if ! [[ -z "$limit_check" ]]; then
+	    jq --null-input \
+         --argjson score 0 \
+         --arg output "$limit_check" \
+         --arg output_format "simple_format" \
+         --arg visibility: "visible" \
+         --arg stdout_visibility: "visible" '$ARGS.named' \
+		> /autograder/results/results.json
+		throw $ERR_RATE
+	fi
+)
+catch || {
+    if [[ "$exception_code" -eq $ERR_RATE ]] ; then
+	   exit 0
+	else
+	    jq --null-input \
+         --argjson score 0 \
+         --arg output "ERROR: Issue encountered when checking the number of submissions made. This is an issue with the test system, not your submitted code. Contact a system administraor for assistance." \
+         --arg output_format "simple_format" \
+         --arg visibility: "visible" \
+         --arg stdout_visibility: "visible" '$ARGS.named' \
+          > /autograder/results/results.json
+        exit 1
+	fi
 }
-EOF
+
+
+
+# Create a user with name student with no password and set permissions for the test harness. Then ,ake folder for storing the student's work where they have more permissions (note write permissions to the submission are removed later)
+try
+(
+    # Add user (with check that doesn't already exist)
+	username_to_use=student
+    id -u "$username_to_use" &> /dev/null || adduser "$username_to_use" --no-create-home --disabled-password --gecos ""
+    
+	# Set permissions
+	chmod 775 /autograder/source
+    cd /autograder/source
+    mkdir -p student_code
+    chmod 777 student_code
+)
+catch || {
+    jq --null-input \
+     --argjson score 0 \
+     --arg output "ERROR: Issue encountered when setting up the test environment. This is an issue with the test system, not your submitted code. Contact a system administraor for assistance." \
+     --arg output_format "simple_format" \
+     --arg visibility: "visible" \
+     --arg stdout_visibility: "visible" '$ARGS.named' \
+     > /autograder/results/results.json
+    exit 1
+}
+
+
+
+# Move the submission from the gradescope submission area to the working folder. Note assumes is called HelloWorld.c here. Set permissions so student's can't edit their submission
+filename="HelloWorld.c"
+try
+(
+    cp /autograder/submission/"$filename" /autograder/source/student_code/"$filename"
+	chmod o-w /autograder/source/student_code/"$filename"
+)
+catch || {
+    jq --null-input \
+     --argjson score 0 \
+     --arg output "ERROR: File could not be found. Check your submitted file has the correct file name. It needs to be exact." \
+     --arg output_format "simple_format" \
+     --arg visibility: "visible" \
+     --arg stdout_visibility: "visible" '$ARGS.named' \
+     > /autograder/results/results.json
+    exit 1
+}
+
+
+
+# Run Python which runs the actual tests
+try
+(
+    cd /autograder/source
+	source /venv/bin/activate
+	runuser -u student -- python3.10 test_wrapper.py > /autograder/results/results.json || throw $ERR_GENERIC
+	deactivate
+)
+catch || {
+    jq --null-input \
+     --argjson score 0 \
+     --arg output "ERROR: Test suite not run. This is most likely an issue with permissions, e.g. using too much memory causing the test suite to error out." \
+     --arg output_format "simple_format" \
+     --arg visibility: "visible" \
+     --arg stdout_visibility: "visible" '$ARGS.named' \
+    > /autograder/results/results.json	
+	exit 1
+}
