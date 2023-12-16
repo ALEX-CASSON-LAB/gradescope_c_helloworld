@@ -1,10 +1,38 @@
 #!/usr/bin/env bash
 
 # Set up the environment
-source ./source/helper_functions/trycatch.sh 
+source /autograder/source/helper_functions/trycatch.sh 
 export ERR_RATE=100
 export ERR_GENERIC=101
-# Note there's no checking on whether these work. If these fails there's no user friendly message displayed to students
+export student_user=student
+test_runner=tester
+# Note there's no checking on whether these work. If these fails there's no user friendly message displayed to students. Could probably add a trap command or similar to catch this
+
+
+
+# Make users and permissions. Submitted code runs as student (set in Popen command in each test). Tasks touching the code run as tester 
+try
+(
+    # Add user (with check that doesn't already exist)
+    id -u "$student_user" &> /dev/null || adduser "$student_user" --no-create-home --disabled-password --gecos "" || throw $ERR_GENERIC
+	id -u "$test_runner" &> /dev/null || adduser "$test_runner" --no-create-home --disabled-password --gecos "" || throw $ERR_GENERIC
+	
+	# Set permissions
+    chgrp -R "$test_runner" /autograder/source || throw $ERR_GENERIC
+	mkdir -p /autograder/student_code throw || $ERR_GENERIC
+    chmod 777 /autograder/student_code || throw $ERR_GENERIC
+    chmod 770 /autograder/source || throw $ERR_GENERIC
+)
+catch || {
+    jq --null-input \
+     --argjson score 0 \
+     --arg output "ERROR: Issue encountered when setting up the test environment. This is an issue with the test system, not your submitted code. Contact a system administraor for assistance." \
+     --arg output_format "simple_format" \
+     --arg visibility: "visible" \
+     --arg stdout_visibility: "visible" '$ARGS.named' \
+     > /autograder/results/results.json
+    exit 1
+}
 
 
 
@@ -12,8 +40,8 @@ export ERR_GENERIC=101
 # Bash doesn't like a redirect on the jq command for some reason here and so the writing to results.json is done in a seperate if statement for ease of getting working
 try
 (
-	chmod u+x ./source/helper_functions/rate_limiter.sh
-	limit_check=$(./source/helper_functions/rate_limiter.sh)
+	chmod u+x /autograder/source/helper_functions/rate_limiter.sh || throw $ERR_GENERIC
+	limit_check=$(runuser -u "$test_runner" -- /autograder/source/helper_functions/rate_limiter.sh) || throw $ERR_GENERIC
 	if ! [[ -z "$limit_check" ]]; then
 	    jq --null-input \
          --argjson score 0 \
@@ -42,38 +70,12 @@ catch || {
 
 
 
-# Create a user with name student with no password and set permissions for the test harness. Then ,ake folder for storing the student's work where they have more permissions (note write permissions to the submission are removed later)
-try
-(
-    # Add user (with check that doesn't already exist)
-	username_to_use=student
-    id -u "$username_to_use" &> /dev/null || adduser "$username_to_use" --no-create-home --disabled-password --gecos ""
-    
-	# Set permissions
-	chmod 775 /autograder/source
-    cd /autograder/source
-    mkdir -p student_code
-    chmod 777 student_code
-)
-catch || {
-    jq --null-input \
-     --argjson score 0 \
-     --arg output "ERROR: Issue encountered when setting up the test environment. This is an issue with the test system, not your submitted code. Contact a system administraor for assistance." \
-     --arg output_format "simple_format" \
-     --arg visibility: "visible" \
-     --arg stdout_visibility: "visible" '$ARGS.named' \
-     > /autograder/results/results.json
-    exit 1
-}
-
-
-
-# Move the submission from the gradescope submission area to the working folder. Note assumes is called HelloWorld.c here. Set permissions so student's can't edit their submission
+# Move the submission from the gradescope submission area to the working folder. Note assumes is called HelloWorld.c here. Set permissions so student's can't edit their submission. Note that this would then fail if there's already a submission that's been copied previously as write permission has been removed.
 filename="HelloWorld.c"
 try
 (
-    cp /autograder/submission/"$filename" /autograder/source/student_code/"$filename"
-	chmod o-w /autograder/source/student_code/"$filename"
+    runuser -u "$test_runner" -- cp /autograder/submission/"$filename" /autograder/student_code/"$filename" || throw $ERR_GENERIC
+	runuser -u "$test_runner" -- chmod o-w /autograder/student_code/"$filename" || throw $ERR_GENERIC
 )
 catch || {
     jq --null-input \
@@ -89,12 +91,13 @@ catch || {
 
 
 # Run Python which runs the actual tests
+# The test wrapper runs as root, as subprocess.Popen(user=...) can't switch user when started as tester
 try
 (
-    cd /autograder/source
-	source /venv/bin/activate
-	runuser -u student -- python3.10 test_wrapper.py > /autograder/results/results.json || throw $ERR_GENERIC
-	deactivate
+    cd /autograder/source || throw $ERR_GENERIC
+	source /venv/bin/activate || throw $ERR_GENERIC
+	python3.10 test_wrapper.py > /autograder/results/results.json || throw $ERR_GENERIC
+	deactivate || throw $ERR_GENERIC
 )
 catch || {
     jq --null-input \
